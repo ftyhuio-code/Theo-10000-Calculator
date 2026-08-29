@@ -1,411 +1,365 @@
 import re
-import csv
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 import pdfplumber
 
-APP_TITLE = "Theo Usage Calculator"
+
+APP_TITLE = "Theo Usage × 10,000 Calculator"
 
 
 # =========================================================
-# HELPER FUNCTIONS
+# NUMBER
 # =========================================================
 
-def num(value):
-    """แปลงข้อความตัวเลข (รองรับวงเล็บลบ และ จุลภาค) เป็น float"""
-    value = str(value).replace(",", "").strip()
+NUMBER_RE = re.compile(
+    r"\(?-?\d[\d,]*(?:\.\d+)?\)?"
+)
+
+
+def to_number(value):
+    """แปลงข้อความตัวเลขจาก PDF เป็น float"""
+    value = str(value).strip().replace(",", "")
+
     if not value:
         return 0.0
-    if value.startswith("(") and value.endswith(")"):
-        return -float(value[1:-1])
-    return float(value)
 
+    negative = (
+        value.startswith("(")
+        and value.endswith(")")
+    )
+
+    value = value.strip("()")
+
+    try:
+        number = float(value)
+    except ValueError:
+        return 0.0
+
+    return -number if negative else number
+
+
+# =========================================================
+# FIND NET SALE
+# =========================================================
+
+def find_net_sale(text):
+
+    patterns = [
+        r"Net\s+Sale\s*[:=]?\s*([\d,]+(?:\.\d+)?)",
+        r"Net\s+Sales\s*[:=]?\s*([\d,]+(?:\.\d+)?)",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            value = to_number(
+                match.group(1)
+            )
+
+            if value > 0:
+                return value
+
+    raise ValueError(
+        "ไม่พบ Net Sale ใน PDF"
+    )
+
+
+# =========================================================
+# CHECK ITEM CODE
+# =========================================================
+
+ITEM_CODE_RE = re.compile(
+    r"^TH[A-Z0-9]+$",
+    re.IGNORECASE
+)
+
+
+def is_item_code(line):
+
+    return bool(
+        ITEM_CODE_RE.fullmatch(
+            line.replace(" ", "")
+        )
+    )
+
+
+# =========================================================
+# EXTRACT DESCRIPTION
+# =========================================================
+
+def extract_description(text):
+
+    match = NUMBER_RE.search(text)
+
+    if not match:
+        return text.strip()
+
+    description = text[
+        :match.start()
+    ].strip()
+
+    description = re.sub(
+        r"\s+",
+        " ",
+        description
+    )
+
+    return description
+
+
+# =========================================================
+# EXTRACT PDF
+# =========================================================
 
 def extract_pdf(pdf_path):
-    text = ""
 
-    # 1. อ่านข้อความทั้งหมดจาก PDF
+    # -----------------------------------------------------
+    # อ่าน PDF
+    # -----------------------------------------------------
+
+    pages_text = []
+
     with pdfplumber.open(pdf_path) as pdf:
+
         for page in pdf.pages:
-            page_text = page.extract_text() or ""
-            text += "\n" + page_text
 
-    # 2. ค้นหา Net Sale
-    net_sale_match = re.search(r"Net\s+Sale\s+([\d,]+(?:\.\d+)?)", text, re.IGNORECASE)
-    if not net_sale_match:
-        raise ValueError("ไม่พบข้อมูล Net Sale ในไฟล์ PDF นี้")
+            page_text = (
+                page.extract_text(
+                    x_tolerance=2,
+                    y_tolerance=3
+                )
+                or ""
+            )
 
-    net_sale = num(net_sale_match.group(1))
-    if net_sale == 0:
-        raise ValueError("Net Sale มีค่าเป็น 0 ไม่สามารถคำนวณได้")
+            if page_text:
+                pages_text.append(
+                    page_text
+                )
 
-    # 3. เตรียม Patterns
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    item_code_pattern = re.compile(r"TH[A-Z0-9]+", re.IGNORECASE)
-    number_pattern = re.compile(r"\(?-?\d[\d,]*(?:\.\d+)?\)?")
+    if not pages_text:
+
+        raise ValueError(
+            "ไม่สามารถอ่านข้อความจาก PDF ได้"
+        )
+
+    text = "\n".join(
+        pages_text
+    )
+
+    # -----------------------------------------------------
+    # Net Sale
+    # -----------------------------------------------------
+
+    net_sale = find_net_sale(
+        text
+    )
+
+    # -----------------------------------------------------
+    # Lines
+    # -----------------------------------------------------
+
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
 
     rows = []
+
     i = 0
-    total_lines = len(lines)
 
-    # 4. วนลูปอ่านข้อมูลสินค้า
-    while i < total_lines:
+    # =====================================================
+    # อ่านข้อมูลแต่ละ Item
+    # =====================================================
+
+    while i < len(lines):
+
         line = lines[i]
-        code_match = item_code_pattern.fullmatch(line.replace(" ", ""))
 
-        if not code_match:
+        # -----------------------------------------------
+        # หา Item Code
+        # -----------------------------------------------
+
+        if not is_item_code(line):
+
             i += 1
             continue
 
-        code = code_match.group(0).upper()
+        code = (
+            line
+            .replace(" ", "")
+            .upper()
+        )
+
+        # -----------------------------------------------
+        # เก็บข้อความของ Item
+        # -----------------------------------------------
+
         block = []
+
         j = i + 1
 
-        # รวบรวมบรรทัดข้อความของ Item จนกว่าจะพบ Item ถัดไป หรือคำสรุป
-        while j < total_lines:
-            next_line = lines[j]
-            
-            if item_code_pattern.fullmatch(next_line.replace(" ", "")) or next_line.startswith(
-                ("Sub Total:", "Item Group:", "Total All Item Groups", "QSA -")
-            ):
-                break
-
-            block.append(next_line)
-            combined = " ".join(block)
-            matches = list(number_pattern.finditer(combined))
-
-            # ต้องพบตัวเลขอย่างน้อย 9 ชุด (คอลัมน์มาตรฐานของรายงาน)
-            if len(matches) >= 9:
-                j += 1
-                break
-
-            j += 1
-
-        block_text = " ".join(block)
-        matches = list(number_pattern.finditer(block_text))
-
-        if len(matches) >= 9:
-            try:
-                # เลือก 9 ตัวเลขสุดท้ายเสมอ (ตัดตัวเลขที่อาจปนอยู่ในชื่อสินค้าออก)
-                val_matches = matches[-9:]
-                values = [num(m.group(0)) for m in val_matches]
-
-                # Index 8 คือ Theo. Usage
-                theo_usage = values[8]
-
-                # Description คือข้อความก่อนหน้าตัวเลขคอลัมน์แรก
-                first_val_start = val_matches[0].start()
-                desc = block_text[:first_val_start].strip()
-                desc = re.sub(r"\s+", " ", desc)
-
-                if desc:
-                    # คำนวณสูตร: Theo Usage × 10,000 ÷ Net Sale
-                    theo_10000 = (theo_usage * 10000) / net_sale
-                    rows.append((code, desc, theo_usage, theo_10000))
-
-            except (ValueError, IndexError, ZeroDivisionError):
-                pass
-
-        i = max(i + 1, j)
-
-    # 5. กรองข้อมูลซ้ำและค่า Theo Usage ที่ติดลบ
-    clean_rows = []
-    seen = set()
-
-    for row in rows:
-        code, desc, theo, result = row
-        key = (code, round(theo, 6))
-
-        if key not in seen and theo >= 0:
-            seen.add(key)
-            clean_rows.append(row)
-
-    return net_sale, clean_rows
-
-
-# =========================================================
-# APPLICATION GUI
-# =========================================================
-
-class App:
-    def __init__(self, root):
-        self.root = root
-        self.root.title(APP_TITLE)
-        self.root.geometry("1100x650")
-        self.root.minsize(850, 500)
-
-        self.rows = []
-        self.net_sale = 0.0
-
-        # Style
-        style = ttk.Style()
-        style.theme_use("clam")
-
-        # Top Frame
-        top = ttk.Frame(root, padding=12)
-        top.pack(fill="x")
-
-        ttk.Label(top, text=APP_TITLE, font=("Segoe UI", 18, "bold")).pack(anchor="w")
-        ttk.Label(
-            top, 
-            text="คำนวณ Theo Usage × 10,000 ÷ Net Sale",
-            font=("Segoe UI", 10)
-        ).pack(anchor="w", pady=(2, 10))
-
-        # Button Bar
-        bar = ttk.Frame(top)
-        bar.pack(fill="x")
-
-        ttk.Button(bar, text="📄 เลือก PDF", command=self.open_pdf).pack(side="left")
-        ttk.Button(bar, text="📊 Export Excel", command=self.export_excel).pack(side="left", padx=8)
-
-        self.info = ttk.Label(bar, text="ยังไม่ได้เลือกไฟล์", font=("Segoe UI", 10, "italic"))
-        self.info.pack(side="left", padx=8)
-
-        # Table Frame
-        frame = ttk.Frame(root, padding=(12, 0, 12, 12))
-        frame.pack(fill="both", expand=True)
-
-        # คอลัมน์ที่แสดง (ตัด Act. Usage ออกแล้ว)
-        columns = ("code", "desc", "theo", "result")
-        self.tree = ttk.Treeview(frame, columns=columns, show="headings")
-
-        self.tree.heading("code", text="Item Code")
-        self.tree.heading("desc", text="Description")
-        self.tree.heading("theo", text="Theo. Usage")
-        self.tree.heading("result", text="Theo × 10,000 ÷ Net Sale")
-
-        self.tree.column("code", width=130, anchor="w")
-        self.tree.column("desc", width=450, anchor="w")
-        self.tree.column("theo", width=150, anchor="e")
-        self.tree.column("result", width=240, anchor="e")
-
-        self.tree.pack(side="left", fill="both", expand=True)
-
-        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
-        scrollbar.pack(side="right", fill="y")
-        self.tree.configure(yscrollcommand=scrollbar.set)
-
-    def open_pdf(self):
-        path = filedialog.askopenfilename(
-            title="เลือก Inventory Activity Standard Report",
-            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")]
-        )
-        if not path:
-            return
-
-        try:
-            self.net_sale, self.rows = extract_pdf(path)
-
-            # ล้างข้อมูลเดิมในตาราง
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-
-            # แสดงผลลัพธ์ใหม่
-            for code, desc, theo, result in self.rows:
-                self.tree.insert(
-                    "",
-                    "end",
-                    values=(
-                        code,
-                        desc,
-                        f"{theo:,.2f}",
-                        f"{result:,.4f}"  # แสดงผลลัพธ์เป็นทศนิยม 4 ตำแหน่ง
-                    )
-                )
-
-            self.info.config(
-                text=f"Net Sale: {self.net_sale:,.2f}   |   พบข้อมูลสำเร็จ {len(self.rows)} รายการ"
-            )
-
-        except Exception as error:
-            messagebox.showerror("อ่าน PDF ไม่สำเร็จ", str(error))
-
-    def export_excel(self):
-        if not self.rows:
-            messagebox.showwarning("ยังไม่มีข้อมูล", "กรุณาเลือกไฟล์ PDF และประมวลผลก่อน")
-            return
-
-        path = filedialog.asksaveasfilename(
-            title="บันทึกผลลัพธ์",
-            defaultextension=".xlsx",
-            filetypes=[("Excel Workbook", "*.xlsx"), ("CSV File", "*.csv")],
-            initialfile="Theo_10000_Result.xlsx"
-        )
-        if not path:
-            return
-
-        try:
-            # พยายาม Export ด้วย pandas ก่อน หากเครื่องผู้ใช้ไม่มีจะสลับไปใช้ csv อัตโนมัติ
-            try:
-                import pandas as pd
-                data = [
-                    {
-                        "Item Code": code,
-                        "Description": desc,
-                        "Theo. Usage": theo,
-                        "Theo × 10,000 ÷ Net Sale": result
-                    }
-                    for code, desc, theo, result in self.rows
-                ]
-                df = pd.DataFrame(data)
-                df.to_excel(path, index=False)
-            except ImportError:
-                if not path.endswith('.csv'):
-                    path = path.rsplit('.', 1)[0] + '.csv'
-                with open(path, mode='w', newline='', encoding='utf-8-sig') as file:
-                    writer = csv.writer(file)
-                    writer.writerow(["Item Code", "Description", "Theo. Usage", "Theo × 10,000 ÷ Net Sale"])
-                    for row in self.rows:
-                        writer.writerow(row)
-
-            messagebox.showinfo("สำเร็จ", f"บันทึกไฟล์เรียบร้อยแล้ว:\n{path}")
-
-        except Exception as error:
-            messagebox.showerror("Export ไม่สำเร็จ", str(error))
-
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = App(root)
-    root.mainloop()
         while j < len(lines):
 
             next_line = lines[j]
 
-            # เจอ Item ถัดไป
-            if item_code_pattern.fullmatch(
-                next_line.replace(" ", "")
-            ):
+            # Item ถัดไป
+            if is_item_code(next_line):
                 break
 
-            # เจอส่วนสรุป
+            # ส่วนสรุป
             if next_line.startswith(
                 (
                     "Sub Total:",
                     "Item Group:",
                     "Total All Item Groups",
-                    "QSA -"
+                    "QSA -",
+                    "Grand Total"
                 )
             ):
                 break
 
-            block.append(next_line)
+            # Header ของตาราง ไม่เอา
+            if (
+                "Act. Usage" in next_line
+                or "Theo. Usage" in next_line
+                or "Variance" == next_line
+            ):
+                j += 1
+                continue
 
-            combined = " ".join(block)
-
-            numbers = number_pattern.findall(
-                combined
+            block.append(
+                next_line
             )
 
-            # มีตัวเลขอย่างน้อย 9 ตัว
-            # จึงสามารถอ่าน Theo Usage ที่ values[8] ได้
-            if len(numbers) >= 9:
+            combined = " ".join(
+                block
+            )
+
+            # -------------------------------------------------
+            # รายการสินค้าจะมีข้อมูลตัวเลขหลายช่อง
+            #
+            # ต้องมีอย่างน้อย 9 ตัว
+            # เพื่ออ่าน Theo Usage
+            # -------------------------------------------------
+
+            number_count = len(
+                NUMBER_RE.findall(
+                    combined
+                )
+            )
+
+            if number_count >= 9:
                 break
 
             j += 1
 
-        block_text = " ".join(block)
+        block_text = " ".join(
+            block
+        )
 
         # =================================================
-        # ดึงตัวเลข
+        # อ่านตัวเลข
         # =================================================
 
-        number_strings = number_pattern.findall(
+        number_strings = NUMBER_RE.findall(
             block_text
         )
 
-        if len(number_strings) >= 9:
+        if len(number_strings) < 9:
 
-            try:
+            i = max(
+                i + 1,
+                j
+            )
 
-                values = [
-                    num(x)
-                    for x in number_strings
-                ]
+            continue
 
-                # =================================================
-                # โครงสร้างข้อมูล
-                #
-                # 0 = Opening
-                # 1 = Purchases
-                # 2 = Return
-                # 3 = Transfer In
-                # 4 = Transfer Out
-                # 5 = Closing
-                # 6 = Act. Usage
-                # 7 = ค่าอื่น
-                # 8 = Theo. Usage
-                #
-                # ใช้ Theo Usage = values[8]
-                # =================================================
+        try:
 
-                act_usage = values[6]
+            values = [
+                to_number(x)
+                for x in number_strings
+            ]
 
-                theo_usage = values[8]
+            # =================================================
+            # Inventory Activity Standard Report
+            #
+            # 0 = Opening
+            # 1 = Purchases
+            # 2 = Return
+            # 3 = Transfer In
+            # 4 = Transfer Out
+            # 5 = Closing
+            # 6 = Act. Usage
+            # 7 = ค่าในคอลัมน์ระหว่างกลาง
+            # 8 = Theo. Usage
+            #
+            # ใช้ Theo Usage เท่านั้น
+            # =================================================
 
-                # =================================================
-                # Description
-                # =================================================
+            theo_usage = values[8]
 
-                first_number = number_pattern.search(
-                    block_text
+            # -------------------------------------------------
+            # Description
+            # -------------------------------------------------
+
+            description = extract_description(
+                block_text
+            )
+
+            if not description:
+
+                i = max(
+                    i + 1,
+                    j
                 )
 
-                if first_number:
+                continue
 
-                    description = (
-                        block_text[
-                            :first_number.start()
-                        ].strip()
-                    )
+            # -------------------------------------------------
+            # คำนวณ
+            # -------------------------------------------------
 
-                else:
+            result = (
+                theo_usage
+                * 10000
+                / net_sale
+            )
 
-                    description = block_text.strip()
+            # -------------------------------------------------
+            # เก็บเฉพาะข้อมูลที่ต้องใช้
+            # -------------------------------------------------
 
-                description = re.sub(
-                    r"\s+",
-                    " ",
-                    description
-                )
+            rows.append(
+                {
+                    "code": code,
+                    "description": description,
+                    "theo_usage": theo_usage,
+                    "result": result
+                }
+            )
 
-                if not description:
-                    i = max(i + 1, j)
-                    continue
+        except (
+            ValueError,
+            IndexError,
+            ZeroDivisionError
+        ):
 
-                # =================================================
-                # สูตร
-                #
-                # Theo Usage × 10,000 ÷ Net Sale
-                #
-                # ผลลัพธ์เป็น "ตัวเลข"
-                # ไม่ใช่เปอร์เซ็นต์
-                # =================================================
+            pass
 
-                theo_10000 = (
-                    theo_usage * 10000
-                ) / net_sale
-
-                rows.append(
-                    (
-                        code,
-                        description,
-                        act_usage,
-                        theo_usage,
-                        theo_10000
-                    )
-                )
-
-            except (
-                ValueError,
-                IndexError,
-                ZeroDivisionError
-            ):
-                pass
-
-        i = max(i + 1, j)
+        i = max(
+            i + 1,
+            j
+        )
 
     # =====================================================
     # ลบข้อมูลซ้ำ
@@ -417,12 +371,12 @@ if __name__ == "__main__":
 
     for row in rows:
 
-        code = row[0]
-        theo_usage = row[3]
-
         key = (
-            code,
-            round(theo_usage, 6)
+            row["code"],
+            round(
+                row["theo_usage"],
+                6
+            )
         )
 
         if key in seen:
@@ -430,9 +384,9 @@ if __name__ == "__main__":
 
         seen.add(key)
 
-        if theo_usage >= 0:
-
-            clean_rows.append(row)
+        clean_rows.append(
+            row
+        )
 
     return net_sale, clean_rows
 
@@ -452,17 +406,16 @@ class App:
         )
 
         self.root.geometry(
-            "1150x680"
+            "1050x650"
         )
 
         self.root.minsize(
-            900,
-            550
+            850,
+            500
         )
 
+        self.net_sale = 0.0
         self.rows = []
-
-        self.net_sale = 0
 
         # =================================================
         # TOP
@@ -492,8 +445,7 @@ class App:
         ttk.Label(
             top,
             text=(
-                "คำนวณ Theo Usage × 10,000 ÷ Net Sale "
-                "โดยผลลัพธ์เป็นตัวเลข"
+                "Theo Usage × 10,000 ÷ Net Sale"
             )
         ).pack(
             anchor="w",
@@ -501,10 +453,12 @@ class App:
         )
 
         # =================================================
-        # BUTTON BAR
+        # BUTTONS
         # =================================================
 
-        bar = ttk.Frame(top)
+        bar = ttk.Frame(
+            top
+        )
 
         bar.pack(
             fill="x"
@@ -538,7 +492,7 @@ class App:
         )
 
         # =================================================
-        # TABLE FRAME
+        # TABLE
         # =================================================
 
         frame = ttk.Frame(
@@ -556,14 +510,9 @@ class App:
             expand=True
         )
 
-        # =================================================
-        # TABLE COLUMNS
-        # =================================================
-
         columns = (
             "code",
-            "desc",
-            "act",
+            "description",
             "theo",
             "result"
         )
@@ -584,18 +533,13 @@ class App:
         )
 
         self.tree.heading(
-            "desc",
+            "description",
             text="Description"
         )
 
         self.tree.heading(
-            "act",
-            text="Act. Usage"
-        )
-
-        self.tree.heading(
             "theo",
-            text="Theo. Usage"
+            text="Theo Usage"
         )
 
         self.tree.heading(
@@ -604,36 +548,30 @@ class App:
         )
 
         # =================================================
-        # COLUMN WIDTH
+        # WIDTH
         # =================================================
 
         self.tree.column(
             "code",
-            width=120,
-            anchor="w"
-        )
-
-        self.tree.column(
-            "desc",
-            width=430,
-            anchor="w"
-        )
-
-        self.tree.column(
-            "act",
             width=130,
-            anchor="e"
+            anchor="w"
+        )
+
+        self.tree.column(
+            "description",
+            width=480,
+            anchor="w"
         )
 
         self.tree.column(
             "theo",
-            width=130,
+            width=160,
             anchor="e"
         )
 
         self.tree.column(
             "result",
-            width=220,
+            width=230,
             anchor="e"
         )
 
@@ -691,33 +629,27 @@ class App:
                 path
             )
 
-            # ล้างข้อมูลเดิม
+            # ล้างข้อมูลเก่า
             for item in self.tree.get_children():
 
-                self.tree.delete(item)
+                self.tree.delete(
+                    item
+                )
 
             # แสดงข้อมูล
-            for (
-                code,
-                description,
-                act_usage,
-                theo_usage,
-                result
-            ) in self.rows:
+            for row in self.rows:
 
                 self.tree.insert(
                     "",
                     "end",
                     values=(
-                        code,
-                        description,
-                        f"{act_usage:,.2f}",
-                        f"{theo_usage:,.2f}",
-                        f"{result:,.2f}"
+                        row["code"],
+                        row["description"],
+                        f"{row['theo_usage']:,.2f}",
+                        f"{row['result']:,.4f}"
                     )
                 )
 
-            # Info
             self.info.config(
                 text=(
                     f"Net Sale: "
@@ -726,6 +658,21 @@ class App:
                     f"พบ {len(self.rows)} รายการ"
                 )
             )
+
+            # -------------------------------------------------
+            # ถ้าอ่านได้แต่ไม่มีรายการ
+            # -------------------------------------------------
+
+            if not self.rows:
+
+                messagebox.showwarning(
+                    "ไม่พบข้อมูล",
+                    (
+                        "พบ Net Sale แล้ว แต่ไม่พบข้อมูล "
+                        "Theo Usage\n\n"
+                        "ตรวจสอบรูปแบบ PDF อีกครั้ง"
+                    )
+                )
 
         except Exception as error:
 
@@ -770,40 +717,69 @@ class App:
             if not path:
                 return
 
-            # =================================================
-            # เตรียมข้อมูล
-            # =================================================
-
             data = []
 
-            for (
-                code,
-                description,
-                act_usage,
-                theo_usage,
-                result
-            ) in self.rows:
+            for row in self.rows:
 
                 data.append(
                     {
-                        "Item Code": code,
-                        "Description": description,
-                        "Act. Usage": act_usage,
-                        "Theo. Usage": theo_usage,
-                        "Theo × 10,000 ÷ Net Sale": result
+                        "Item Code":
+                            row["code"],
+
+                        "Description":
+                            row["description"],
+
+                        "Theo Usage":
+                            row["theo_usage"],
+
+                        "Theo × 10,000 ÷ Net Sale":
+                            row["result"]
                     }
                 )
 
-            df = pd.DataFrame(data)
-
-            # =================================================
-            # Export
-            # =================================================
-
-            df.to_excel(
-                path,
-                index=False
+            df = pd.DataFrame(
+                data
             )
+
+            # ---------------------------------------------
+            # เพิ่มข้อมูล Net Sale
+            # ---------------------------------------------
+
+            with pd.ExcelWriter(
+                path,
+                engine="openpyxl"
+            ) as writer:
+
+                df.to_excel(
+                    writer,
+                    index=False,
+                    sheet_name="Theo Result"
+                )
+
+                worksheet = writer.sheets[
+                    "Theo Result"
+                ]
+
+                # ปรับความกว้างคอลัมน์
+                worksheet.column_dimensions[
+                    "A"
+                ].width = 18
+
+                worksheet.column_dimensions[
+                    "B"
+                ].width = 50
+
+                worksheet.column_dimensions[
+                    "C"
+                ].width = 18
+
+                worksheet.column_dimensions[
+                    "D"
+                ].width = 28
+
+                # เพิ่ม Net Sale
+                worksheet["F1"] = "Net Sale"
+                worksheet["G1"] = self.net_sale
 
             messagebox.showinfo(
                 "สำเร็จ",
@@ -837,6 +813,6 @@ if __name__ == "__main__":
 
         pass
 
-    app = App(root)
+    App(root)
 
     root.mainloop()

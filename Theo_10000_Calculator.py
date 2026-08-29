@@ -1,10 +1,10 @@
 import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from pathlib import Path
 import pdfplumber
 
 APP_TITLE = "Theo × 10,000 Calculator"
+
 
 def num(s):
     s = s.replace(",", "").strip()
@@ -12,29 +12,207 @@ def num(s):
         return -float(s[1:-1])
     return float(s)
 
+
 def extract_pdf(pdf_path):
-    text = ""
+    """
+    อ่าน Inventory Activity Standard Report
+
+    สูตร:
+        Theo Usage × 10,000 ÷ Net Sale
+
+    สำคัญ:
+    พยายามอ่านค่าจากตำแหน่ง Theo. Usage
+    โดยอาศัยหัวตารางและโครงสร้างแถว
+    """
+
+    all_lines = []
+
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            text += "\n" + (page.extract_text() or "")
+            text = page.extract_text() or ""
+            all_lines.extend(
+                line.strip()
+                for line in text.splitlines()
+                if line.strip()
+            )
 
-    # Net Sale from the Summary page
-    m = re.search(r"Net Sale\s+([\d,]+\.\d+)", text, re.I)
-    if not m:
+    text_all = "\n".join(all_lines)
+
+    # ---------------------------------------------------------
+    # หา Net Sale
+    # ---------------------------------------------------------
+    net_sale = None
+
+    patterns = [
+        r"Net Sale\s+([\d,]+\.\d+)",
+        r"Net\s+Sale\s+([\d,]+\.\d+)",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, text_all, re.I)
+        if m:
+            net_sale = num(m.group(1))
+            break
+
+    if net_sale is None:
         raise ValueError("ไม่พบ Net Sale ใน PDF")
-    net_sale = num(m.group(1))
 
-    # Rows in this report end with:
-    # ... Act. Usage, Theo. Usage, Variance, Variance Amount, Raw Waste, Finished Waste, Eff %, Stock Outstanding
-    # We read the last numeric block on each item row.
+    # ---------------------------------------------------------
+    # หา Item rows
+    # ---------------------------------------------------------
     rows = []
-    lines = [x.strip() for x in text.splitlines() if x.strip()]
 
-    # Join wrapped descriptions by detecting an item code such as THK0002 / THF2100
+    # Item code ของรายงาน เช่น THK0002 / THF2100
+    item_code_pattern = re.compile(
+        r"^TH[A-Z0-9]{3,}$",
+        re.I
+    )
+
+    # ตัวเลข
+    number_pattern = re.compile(
+        r"?-?\d[\d,]*(?:\.\d+)??"
+    )
+
     i = 0
-    while i < len(lines):
-        line = lines[i]
-        code_match = re.fullmatch(r"(TH[A-Z0-9]+)", line.replace(" ", ""))
+
+    while i < len(all_lines):
+
+        line = all_lines[i]
+        code = line.replace(" ", "")
+
+        if not item_code_pattern.fullmatch(code):
+            i += 1
+            continue
+
+        # -----------------------------------------------------
+        # เจอ Item Code
+        # -----------------------------------------------------
+        item_code = code.upper()
+
+        block = []
+        j = i + 1
+
+        while j < len(all_lines):
+
+            current = all_lines[j]
+
+            # เจอ Item Code ใหม่ = จบแถวเดิม
+            if item_code_pattern.fullmatch(
+                current.replace(" ", "")
+            ):
+                break
+
+            # เจอส่วนสรุป = จบ
+            stop_words = (
+                "Sub Total:",
+                "Item Group:",
+                "Total All Item Groups",
+                "QSA -",
+            )
+
+            if current.startswith(stop_words):
+                break
+
+            block.append(current)
+
+            # ป้องกันอ่านยาวเกินไป
+            if len(block) >= 5:
+                break
+
+            j += 1
+
+        block_text = " ".join(block)
+
+        # -----------------------------------------------------
+        # ดึงตัวเลขทั้งหมด
+        # -----------------------------------------------------
+        matches = number_pattern.findall(block_text)
+
+        if len(matches) >= 8:
+
+            try:
+                values = [num(x) for x in matches]
+
+                # -------------------------------------------------
+                # โครงสร้างมาตรฐาน:
+                #
+                # 1 Opening
+                # 2 Purchases
+                # 3 Return
+                # 4 Transfer In
+                # 5 Transfer Out
+                # 6 Closing
+                # 7 Act. Usage
+                # 8 Theo. Usage
+                # 9 Variance
+                # 10 Variance Amount
+                # ...
+                #
+                # Theo Usage = index 7
+                # -------------------------------------------------
+
+                theo_usage = values[7]
+
+                # หา Description
+                desc_match = re.match(
+                    r"^(.*?)(?=?-?\d[\d,]*(?:\.\d+)??)",
+                    block_text
+                )
+
+                if desc_match:
+                    description = desc_match.group(1).strip()
+                else:
+                    description = block_text
+
+                # ตัดหน่วยที่อาจติดด้านหน้า
+                description = re.sub(
+                    r"^(PC|PA|CU|EA|KG|X)\s+",
+                    "",
+                    description,
+                    flags=re.I
+                ).strip()
+
+                result = (
+                    theo_usage * 10000 / net_sale
+                    if net_sale
+                    else 0
+                )
+
+                rows.append(
+                    (
+                        item_code,
+                        description,
+                        theo_usage,
+                        result
+                    )
+                )
+
+            except (ValueError, IndexError):
+                pass
+
+        i = max(i + 1, j)
+
+    # ---------------------------------------------------------
+    # ลบรายการซ้ำ
+    # ---------------------------------------------------------
+    clean = []
+    seen = set()
+
+    for row in rows:
+
+        key = (
+            row[0],
+            row[2]
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        # ไม่เอา Theo ติดลบ
+        if row[2] >= 0:
+                   code_match = re.fullmatch(r"(TH[A-Z0-9]+)", line.replace(" ", ""))
         if code_match:
             code = code_match.group(1)
             j = i + 1

@@ -1,11 +1,31 @@
 import re
+import json
+import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import threading
+from pathlib import Path
+
 import pdfplumber
 
 
 APP_TITLE = "Theo Usage Calculator"
+
+SETTINGS_FILE = Path.home() / "Theo_Usage_Calculator_Settings.json"
+
+DEFAULT_COLUMN = 8
+
+COLUMN_NAMES = {
+    1: "Opening",
+    2: "Purchases",
+    3: "Return",
+    4: "Transfer In",
+    5: "Transfer Out",
+    6: "Closing",
+    7: "Act. Usage",
+    8: "Theo. Usage",
+    9: "Variance",
+    10: "Variance Amount",
+}
 
 
 # =========================================================
@@ -25,44 +45,96 @@ def num(value):
 
 
 # =========================================================
-# EXTRACT PDF
+# SETTINGS
 # =========================================================
 
-def extract_pdf(pdf_path, status_callback=None):
+def load_settings():
+
+    try:
+        if SETTINGS_FILE.exists():
+
+            with open(
+                SETTINGS_FILE,
+                "r",
+                encoding="utf-8"
+            ) as file:
+
+                data = json.load(file)
+
+                if isinstance(data, dict):
+                    return data
+
+    except Exception:
+        pass
+
+    return {
+        "default_column": DEFAULT_COLUMN,
+        "items": {}
+    }
+
+
+def save_settings(settings):
+
+    with open(
+        SETTINGS_FILE,
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        json.dump(
+            settings,
+            file,
+            ensure_ascii=False,
+            indent=4
+        )
+
+
+# =========================================================
+# COLUMN
+# =========================================================
+
+def get_column_number(value):
+
+    try:
+
+        number = int(value)
+
+        if number < 1 or number > 10:
+            return DEFAULT_COLUMN
+
+        return number
+
+    except Exception:
+
+        return DEFAULT_COLUMN
+
+
+# =========================================================
+# PDF EXTRACTION
+# =========================================================
+
+def extract_pdf(pdf_path, default_column, item_settings):
 
     text_parts = []
 
-    # =====================================================
+    # -----------------------------------------------------
     # อ่าน PDF
-    # =====================================================
+    # -----------------------------------------------------
 
     with pdfplumber.open(pdf_path) as pdf:
 
-        total_pages = len(pdf.pages)
-
-        for page_number, page in enumerate(pdf.pages, start=1):
+        for page in pdf.pages:
 
             page_text = page.extract_text() or ""
 
             if page_text:
                 text_parts.append(page_text)
 
-            if status_callback:
-                status_callback(
-                    f"กำลังอ่าน PDF... หน้า {page_number}/{total_pages}"
-                )
-
     text = "\n".join(text_parts)
 
-    if not text.strip():
-        raise ValueError("ไม่สามารถอ่านข้อความจาก PDF ได้")
-
-    # =====================================================
-    # หา Net Sale
-    # =====================================================
-
-    if status_callback:
-        status_callback("กำลังค้นหา Net Sale...")
+    # -----------------------------------------------------
+    # Net Sale
+    # -----------------------------------------------------
 
     net_sale_match = re.search(
         r"Net\s+Sale\s+([\d,]+(?:\.\d+)?)",
@@ -71,26 +143,30 @@ def extract_pdf(pdf_path, status_callback=None):
     )
 
     if not net_sale_match:
-        raise ValueError("ไม่พบ Net Sale ใน PDF")
 
-    net_sale = num(net_sale_match.group(1))
+        raise ValueError(
+            "ไม่พบ Net Sale ใน PDF"
+        )
+
+    net_sale = num(
+        net_sale_match.group(1)
+    )
 
     if net_sale == 0:
-        raise ValueError("Net Sale เป็น 0 ไม่สามารถคำนวณได้")
 
-    # =====================================================
-    # แยกบรรทัด
-    # =====================================================
+        raise ValueError(
+            "Net Sale เป็น 0 ไม่สามารถคำนวณได้"
+        )
+
+    # -----------------------------------------------------
+    # Lines
+    # -----------------------------------------------------
 
     lines = [
         line.strip()
         for line in text.splitlines()
         if line.strip()
     ]
-
-    # =====================================================
-    # Pattern
-    # =====================================================
 
     item_code_pattern = re.compile(
         r"TH[A-Z0-9]+",
@@ -111,11 +187,6 @@ def extract_pdf(pdf_path, status_callback=None):
 
     while i < len(lines):
 
-        if status_callback and i % 20 == 0:
-            status_callback(
-                f"กำลังประมวลผลข้อมูล... {i}/{len(lines)}"
-            )
-
         line = lines[i]
 
         code_match = item_code_pattern.fullmatch(
@@ -123,14 +194,11 @@ def extract_pdf(pdf_path, status_callback=None):
         )
 
         if not code_match:
+
             i += 1
             continue
 
         code = code_match.group(0).upper()
-
-        # -------------------------------------------------
-        # เก็บข้อมูลของ Item
-        # -------------------------------------------------
 
         block = []
 
@@ -140,13 +208,11 @@ def extract_pdf(pdf_path, status_callback=None):
 
             next_line = lines[j]
 
-            # Item ถัดไป
             if item_code_pattern.fullmatch(
                 next_line.replace(" ", "")
             ):
                 break
 
-            # ส่วนสรุป
             if next_line.startswith(
                 (
                     "Sub Total:",
@@ -161,24 +227,17 @@ def extract_pdf(pdf_path, status_callback=None):
 
             combined = " ".join(block)
 
-            number_strings = number_pattern.findall(
+            numbers = number_pattern.findall(
                 combined
             )
 
-            # =================================================
-            # เมื่อมีตัวเลขครบ 8 ช่อง
-            # =================================================
-
-            if len(number_strings) >= 8:
+            # รายการมาตรฐานมีอย่างน้อย 10 คอลัมน์
+            if len(numbers) >= 10:
                 break
 
             j += 1
 
         block_text = " ".join(block)
-
-        # =====================================================
-        # ดึงตัวเลข
-        # =====================================================
 
         number_strings = number_pattern.findall(
             block_text
@@ -189,31 +248,43 @@ def extract_pdf(pdf_path, status_callback=None):
             try:
 
                 values = [
-                    num(x)
-                    for x in number_strings
+                    num(value)
+                    for value in number_strings
                 ]
 
-                # =================================================
-                # Theo Usage
+                # -------------------------------------------------
+                # เลือกคอลัมน์
                 #
-                # ช่องที่ 8
-                # Python index = 7
+                # ถ้ามีการตั้งเฉพาะ Item
+                # ให้ใช้ค่าของ Item นั้น
                 #
-                # 1 Opening
-                # 2 Purchases
-                # 3 Return
-                # 4 Transfer In
-                # 5 Transfer Out
-                # 6 Closing
-                # 7 Act. Usage
-                # 8 Theo. Usage
-                # =================================================
+                # ถ้าไม่มี
+                # ให้ใช้ค่า Default
+                # -------------------------------------------------
 
-                theo_usage = values[7]
+                if code in item_settings:
 
-                # =================================================
+                    column_number = get_column_number(
+                        item_settings[code]
+                    )
+
+                else:
+
+                    column_number = get_column_number(
+                        default_column
+                    )
+
+                selected_value = 0.0
+
+                index = column_number - 1
+
+                if 0 <= index < len(values):
+
+                    selected_value = values[index]
+
+                # -------------------------------------------------
                 # Description
-                # =================================================
+                # -------------------------------------------------
 
                 first_number = number_pattern.search(
                     block_text
@@ -221,9 +292,11 @@ def extract_pdf(pdf_path, status_callback=None):
 
                 if first_number:
 
-                    description = block_text[
-                        :first_number.start()
-                    ].strip()
+                    description = (
+                        block_text[
+                            :first_number.start()
+                        ].strip()
+                    )
 
                 else:
 
@@ -236,43 +309,48 @@ def extract_pdf(pdf_path, status_callback=None):
                 )
 
                 if not description:
-                    i = max(i + 1, j)
+
+                    i = max(
+                        i + 1,
+                        j
+                    )
+
                     continue
 
-                # =================================================
-                # คำนวณ
-                #
-                # Theo Usage × 10,000 ÷ Net Sale
-                # =================================================
+                # -------------------------------------------------
+                # สูตร
+                # -------------------------------------------------
 
                 result = (
-                    theo_usage * 10000
+                    selected_value * 10000
                 ) / net_sale
 
                 rows.append(
-                    (
-                        code,
-                        description,
-                        theo_usage,
-                        result
-                    )
+                    {
+                        "code": code,
+                        "description": description,
+                        "theo_usage": selected_value,
+                        "result": result,
+                        "column": column_number,
+                        "column_name": COLUMN_NAMES.get(
+                            column_number,
+                            f"Column {column_number}"
+                        )
+                    }
                 )
 
-            except (
-                ValueError,
-                IndexError,
-                ZeroDivisionError
-            ):
+            except Exception:
+
                 pass
 
-        i = max(i + 1, j)
+        i = max(
+            i + 1,
+            j
+        )
 
     # =====================================================
-    # ลบข้อมูลซ้ำ
+    # Remove duplicates
     # =====================================================
-
-    if status_callback:
-        status_callback("กำลังตรวจสอบและลบข้อมูลซ้ำ...")
 
     clean_rows = []
 
@@ -280,12 +358,12 @@ def extract_pdf(pdf_path, status_callback=None):
 
     for row in rows:
 
-        code = row[0]
-        theo_usage = row[2]
-
         key = (
-            code,
-            round(theo_usage, 6)
+            row["code"],
+            round(
+                row["theo_usage"],
+                6
+            )
         )
 
         if key in seen:
@@ -293,13 +371,7 @@ def extract_pdf(pdf_path, status_callback=None):
 
         seen.add(key)
 
-        if theo_usage >= 0:
-            clean_rows.append(row)
-
-    if status_callback:
-        status_callback(
-            f"ประมวลผลเสร็จแล้ว พบ {len(clean_rows)} รายการ"
-        )
+        clean_rows.append(row)
 
     return net_sale, clean_rows
 
@@ -314,14 +386,16 @@ class App:
 
         self.root = root
 
-        self.root.title(APP_TITLE)
+        self.root.title(
+            APP_TITLE
+        )
 
         self.root.geometry(
-            "1050x650"
+            "1150x700"
         )
 
         self.root.minsize(
-            850,
+            900,
             550
         )
 
@@ -329,12 +403,32 @@ class App:
 
         self.net_sale = 0
 
-        # =================================================
-        # TOP
-        # =================================================
+        self.settings = load_settings()
+
+        self.default_column = get_column_number(
+            self.settings.get(
+                "default_column",
+                DEFAULT_COLUMN
+            )
+        )
+
+        self.item_settings = self.settings.get(
+            "items",
+            {}
+        )
+
+        self.loading_window = None
+
+        self.create_ui()
+
+    # =====================================================
+    # UI
+    # =====================================================
+
+    def create_ui(self):
 
         top = ttk.Frame(
-            root,
+            self.root,
             padding=12
         )
 
@@ -357,16 +451,12 @@ class App:
         ttk.Label(
             top,
             text=(
-                "Theo Usage × 10,000 ÷ Net Sale"
+                "คำนวณค่าจากคอลัมน์ที่เลือก × 10,000 ÷ Net Sale"
             )
         ).pack(
             anchor="w",
             pady=(4, 10)
         )
-
-        # =================================================
-        # BUTTON BAR
-        # =================================================
 
         bar = ttk.Frame(top)
 
@@ -374,14 +464,25 @@ class App:
             fill="x"
         )
 
-        self.open_button = ttk.Button(
+        self.pdf_button = ttk.Button(
             bar,
             text="📄 เลือก PDF",
             command=self.open_pdf
         )
 
-        self.open_button.pack(
+        self.pdf_button.pack(
             side="left"
+        )
+
+        self.settings_button = ttk.Button(
+            bar,
+            text="⚙ ตั้งค่า",
+            command=self.open_settings
+        )
+
+        self.settings_button.pack(
+            side="left",
+            padx=8
         )
 
         self.export_button = ttk.Button(
@@ -391,8 +492,7 @@ class App:
         )
 
         self.export_button.pack(
-            side="left",
-            padx=8
+            side="left"
         )
 
         self.info = ttk.Label(
@@ -402,7 +502,7 @@ class App:
 
         self.info.pack(
             side="left",
-            padx=8
+            padx=10
         )
 
         # =================================================
@@ -410,7 +510,7 @@ class App:
         # =================================================
 
         frame = ttk.Frame(
-            root,
+            self.root,
             padding=(
                 12,
                 0,
@@ -425,6 +525,7 @@ class App:
         )
 
         columns = (
+            "no",
             "code",
             "desc",
             "theo",
@@ -437,9 +538,10 @@ class App:
             show="headings"
         )
 
-        # =================================================
-        # HEADERS
-        # =================================================
+        self.tree.heading(
+            "no",
+            text="ลำดับ"
+        )
 
         self.tree.heading(
             "code",
@@ -461,20 +563,20 @@ class App:
             text="ผลลัพธ์"
         )
 
-        # =================================================
-        # COLUMN WIDTH
-        # =================================================
+        self.tree.column(
+            "no",
+            width=60,
+            anchor="center"
+        )
 
         self.tree.column(
             "code",
-            width=130,
-            anchor="w"
+            width=120
         )
 
         self.tree.column(
             "desc",
-            width=500,
-            anchor="w"
+            width=520
         )
 
         self.tree.column(
@@ -495,10 +597,6 @@ class App:
             expand=True
         )
 
-        # =================================================
-        # SCROLLBAR
-        # =================================================
-
         scrollbar = ttk.Scrollbar(
             frame,
             orient="vertical",
@@ -514,21 +612,13 @@ class App:
             yscrollcommand=scrollbar.set
         )
 
-        # =================================================
-        # LOADING WINDOW
-        # =================================================
-
-        self.loading_window = None
-        self.loading_label = None
-        self.progress = None
-
     # =====================================================
-    # SHOW LOADING
+    # LOADING
     # =====================================================
 
     def show_loading(self):
 
-        if self.loading_window is not None:
+        if self.loading_window:
             return
 
         self.loading_window = tk.Toplevel(
@@ -540,7 +630,7 @@ class App:
         )
 
         self.loading_window.geometry(
-            "420x170"
+            "380x150"
         )
 
         self.loading_window.resizable(
@@ -548,125 +638,64 @@ class App:
             False
         )
 
-        # ป้องกันปิดหน้าต่างระหว่างทำงาน
-        self.loading_window.protocol(
-            "WM_DELETE_WINDOW",
-            lambda: None
-        )
-
-        # อยู่ด้านหน้า
         self.loading_window.transient(
             self.root
         )
 
         self.loading_window.grab_set()
 
-        container = ttk.Frame(
+        frame = ttk.Frame(
             self.loading_window,
             padding=20
         )
 
-        container.pack(
+        frame.pack(
             fill="both",
             expand=True
         )
 
         ttk.Label(
-            container,
-            text="กำลังประมวลผล PDF",
+            frame,
+            text="กำลังอ่านและประมวลผล PDF...",
             font=(
                 "Segoe UI",
-                14,
+                11,
                 "bold"
             )
         ).pack(
-            pady=(0, 12)
-        )
-
-        self.loading_label = ttk.Label(
-            container,
-            text="กำลังเริ่มต้น..."
-        )
-
-        self.loading_label.pack(
-            pady=(0, 12)
+            pady=(5, 12)
         )
 
         self.progress = ttk.Progressbar(
-            container,
-            mode="indeterminate",
-            length=350
+            frame,
+            mode="indeterminate"
         )
 
-        self.progress.pack()
-
-        self.progress.start(10)
-
-        self.root.update_idletasks()
-
-        # จัดกลางหน้าจอ
-        self.loading_window.update_idletasks()
-
-        root_x = self.root.winfo_x()
-        root_y = self.root.winfo_y()
-
-        root_w = self.root.winfo_width()
-        root_h = self.root.winfo_height()
-
-        win_w = self.loading_window.winfo_width()
-        win_h = self.loading_window.winfo_height()
-
-        x = root_x + (root_w - win_w) // 2
-        y = root_y + (root_h - win_h) // 2
-
-        self.loading_window.geometry(
-            f"+{x}+{y}"
+        self.progress.pack(
+            fill="x"
         )
 
-    # =====================================================
-    # UPDATE LOADING
-    # =====================================================
-
-    def update_loading(self, message):
-
-        self.root.after(
-            0,
-            lambda: self._update_loading_text(
-                message
-            )
+        self.progress.start(
+            10
         )
-
-    def _update_loading_text(self, message):
-
-        if self.loading_label:
-
-            self.loading_label.config(
-                text=message
-            )
-
-    # =====================================================
-    # HIDE LOADING
-    # =====================================================
 
     def hide_loading(self):
 
         if self.loading_window:
 
             try:
-
-                if self.progress:
-                    self.progress.stop()
-
-                self.loading_window.grab_release()
-
-                self.loading_window.destroy()
-
-            except tk.TclError:
+                self.progress.stop()
+            except Exception:
                 pass
 
-        self.loading_window = None
-        self.loading_label = None
-        self.progress = None
+            try:
+                self.loading_window.grab_release()
+            except Exception:
+                pass
+
+            self.loading_window.destroy()
+
+            self.loading_window = None
 
     # =====================================================
     # OPEN PDF
@@ -691,11 +720,13 @@ class App:
         if not path:
             return
 
-        # =================================================
-        # ล็อกปุ่ม
-        # =================================================
+        self.show_loading()
 
-        self.open_button.config(
+        self.pdf_button.config(
+            state="disabled"
+        )
+
+        self.settings_button.config(
             state="disabled"
         )
 
@@ -703,18 +734,8 @@ class App:
             state="disabled"
         )
 
-        self.info.config(
-            text="กำลังประมวลผล..."
-        )
-
-        self.show_loading()
-
-        # =================================================
-        # Thread
-        # =================================================
-
         thread = threading.Thread(
-            target=self.process_pdf,
+            target=self.process_pdf_thread,
             args=(path,),
             daemon=True
         )
@@ -722,21 +743,22 @@ class App:
         thread.start()
 
     # =====================================================
-    # PROCESS PDF
+    # PDF THREAD
     # =====================================================
 
-    def process_pdf(self, path):
+    def process_pdf_thread(self, path):
 
         try:
 
             net_sale, rows = extract_pdf(
                 path,
-                status_callback=self.update_loading
+                self.default_column,
+                self.item_settings
             )
 
             self.root.after(
                 0,
-                lambda: self.display_results(
+                lambda: self.pdf_success(
                     net_sale,
                     rows
                 )
@@ -747,15 +769,15 @@ class App:
             self.root.after(
                 0,
                 lambda: self.pdf_error(
-                    error
+                    str(error)
                 )
             )
 
     # =====================================================
-    # DISPLAY RESULTS
+    # SUCCESS
     # =====================================================
 
-    def display_results(
+    def pdf_success(
         self,
         net_sale,
         rows
@@ -765,82 +787,614 @@ class App:
 
         self.rows = rows
 
-        # =================================================
-        # ล้างข้อมูลเดิม
-        # =================================================
-
         for item in self.tree.get_children():
 
             self.tree.delete(item)
 
-        # =================================================
-        # แสดงข้อมูล
-        # =================================================
-
-        for (
-            code,
-            description,
-            theo_usage,
-            result
-        ) in rows:
+        for index, row in enumerate(
+            self.rows,
+            start=1
+        ):
 
             self.tree.insert(
                 "",
                 "end",
                 values=(
-                    code,
-                    description,
-                    f"{theo_usage:,.2f}",
-                    f"{result:,.2f}"
+                    index,
+                    row["code"],
+                    row["description"],
+                    f'{row["theo_usage"]:,.2f}',
+                    f'{row["result"]:,.2f}'
                 )
             )
-
-        # =================================================
-        # Info
-        # =================================================
 
         self.info.config(
             text=(
                 f"Net Sale: "
                 f"{self.net_sale:,.2f}"
-                f"   |   "
-                f"พบ {len(self.rows)} รายการ"
+                f" | พบ "
+                f"{len(self.rows)} รายการ"
             )
-        )
-
-        self.open_button.config(
-            state="normal"
-        )
-
-        self.export_button.config(
-            state="normal" if self.rows else "disabled"
         )
 
         self.hide_loading()
 
+        self.pdf_button.config(
+            state="normal"
+        )
+
+        self.settings_button.config(
+            state="normal"
+        )
+
+        self.export_button.config(
+            state="normal"
+        )
+
     # =====================================================
-    # PDF ERROR
+    # ERROR
     # =====================================================
 
     def pdf_error(self, error):
 
         self.hide_loading()
 
-        self.open_button.config(
+        self.pdf_button.config(
+            state="normal"
+        )
+
+        self.settings_button.config(
             state="normal"
         )
 
         self.export_button.config(
-            state="normal" if self.rows else "disabled"
-        )
-
-        self.info.config(
-            text="อ่าน PDF ไม่สำเร็จ"
+            state="normal"
         )
 
         messagebox.showerror(
             "อ่าน PDF ไม่สำเร็จ",
-            str(error)
+            error
+        )
+
+    # =====================================================
+    # SETTINGS
+    # =====================================================
+
+    def open_settings(self):
+
+        window = tk.Toplevel(
+            self.root
+        )
+
+        window.title(
+            "ตั้งค่าการคำนวณ"
+        )
+
+        window.geometry(
+            "950x650"
+        )
+
+        window.minsize(
+            800,
+            500
+        )
+
+        # =================================================
+        # TITLE
+        # =================================================
+
+        top = ttk.Frame(
+            window,
+            padding=12
+        )
+
+        top.pack(
+            fill="x"
+        )
+
+        ttk.Label(
+            top,
+            text="⚙ ตั้งค่าการคำนวณ",
+            font=(
+                "Segoe UI",
+                16,
+                "bold"
+            )
+        ).pack(
+            anchor="w"
+        )
+
+        ttk.Label(
+            top,
+            text=(
+                "สามารถเปลี่ยนทั้งหมด หรือเปลี่ยนเฉพาะรายการได้"
+            )
+        ).pack(
+            anchor="w",
+            pady=(4, 10)
+        )
+
+        # =================================================
+        # MODE 1 - CHANGE ALL
+        # =================================================
+
+        all_frame = ttk.LabelFrame(
+            window,
+            text="1. เปลี่ยนทั้งหมด",
+            padding=12
+        )
+
+        all_frame.pack(
+            fill="x",
+            padx=12,
+            pady=(0, 10)
+        )
+
+        ttk.Label(
+            all_frame,
+            text="คอลัมน์สำหรับทุกรายการ:"
+        ).pack(
+            side="left"
+        )
+
+        all_var = tk.StringVar()
+
+        all_combo = ttk.Combobox(
+            all_frame,
+            textvariable=all_var,
+            values=[
+                f"{number} - {name}"
+                for number, name
+                in COLUMN_NAMES.items()
+            ],
+            state="readonly",
+            width=30
+        )
+
+        all_combo.set(
+            f"{self.default_column} - "
+            f"{COLUMN_NAMES[self.default_column]}"
+        )
+
+        all_combo.pack(
+            side="left",
+            padx=8
+        )
+
+        def get_combo_number(combo):
+
+            match = re.match(
+                r"(\d+)",
+                combo.get()
+            )
+
+            if not match:
+                return DEFAULT_COLUMN
+
+            return get_column_number(
+                match.group(1)
+            )
+
+        def change_all():
+
+            number = get_combo_number(
+                all_combo
+            )
+
+            self.default_column = number
+
+            # ---------------------------------------------
+            # ล้าง override ราย Item
+            # ---------------------------------------------
+
+            self.item_settings.clear()
+
+            self.settings[
+                "default_column"
+            ] = number
+
+            self.settings[
+                "items"
+            ] = self.item_settings
+
+            save_settings(
+                self.settings
+            )
+
+            refresh_table()
+
+            messagebox.showinfo(
+                "สำเร็จ",
+                (
+                    "เปลี่ยนทุก Item เป็น\n\n"
+                    f"{number} - "
+                    f"{COLUMN_NAMES[number]}"
+                ),
+                parent=window
+            )
+
+        ttk.Button(
+            all_frame,
+            text="เปลี่ยนทั้งหมด",
+            command=change_all
+        ).pack(
+            side="left",
+            padx=8
+        )
+
+        # =================================================
+        # MODE 2 - CHANGE SINGLE
+        # =================================================
+
+        single_frame = ttk.LabelFrame(
+            window,
+            text="2. เปลี่ยนรายรายการ",
+            padding=12
+        )
+
+        single_frame.pack(
+            fill="both",
+            expand=True,
+            padx=12
+        )
+
+        # -------------------------------------------------
+        # Table
+        # -------------------------------------------------
+
+        table_frame = ttk.Frame(
+            single_frame
+        )
+
+        table_frame.pack(
+            fill="both",
+            expand=True
+        )
+
+        columns = (
+            "no",
+            "code",
+            "desc",
+            "column"
+        )
+
+        settings_tree = ttk.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings",
+            selectmode="browse"
+        )
+
+        settings_tree.heading(
+            "no",
+            text="ลำดับ"
+        )
+
+        settings_tree.heading(
+            "code",
+            text="Item Code"
+        )
+
+        settings_tree.heading(
+            "desc",
+            text="Description"
+        )
+
+        settings_tree.heading(
+            "column",
+            text="คอลัมน์ที่ใช้"
+        )
+
+        settings_tree.column(
+            "no",
+            width=60,
+            anchor="center"
+        )
+
+        settings_tree.column(
+            "code",
+            width=120
+        )
+
+        settings_tree.column(
+            "desc",
+            width=430
+        )
+
+        settings_tree.column(
+            "column",
+            width=180,
+            anchor="center"
+        )
+
+        settings_tree.pack(
+            side="left",
+            fill="both",
+            expand=True
+        )
+
+        settings_scroll = ttk.Scrollbar(
+            table_frame,
+            orient="vertical",
+            command=settings_tree.yview
+        )
+
+        settings_scroll.pack(
+            side="right",
+            fill="y"
+        )
+
+        settings_tree.configure(
+            yscrollcommand=settings_scroll.set
+        )
+
+        # -------------------------------------------------
+        # Refresh Table
+        # -------------------------------------------------
+
+        def refresh_table():
+
+            for item in settings_tree.get_children():
+
+                settings_tree.delete(item)
+
+            for index, row in enumerate(
+                self.rows,
+                start=1
+            ):
+
+                code = row["code"]
+
+                if code in self.item_settings:
+
+                    column = get_column_number(
+                        self.item_settings[code]
+                    )
+
+                else:
+
+                    column = self.default_column
+
+                settings_tree.insert(
+                    "",
+                    "end",
+                    iid=str(index),
+                    values=(
+                        index,
+                        code,
+                        row["description"],
+                        (
+                            f"{column} - "
+                            f"{COLUMN_NAMES[column]}"
+                        )
+                    )
+                )
+
+        refresh_table()
+
+        # =================================================
+        # SINGLE EDIT
+        # =================================================
+
+        edit_frame = ttk.Frame(
+            single_frame,
+            padding=(0, 10, 0, 0)
+        )
+
+        edit_frame.pack(
+            fill="x"
+        )
+
+        ttk.Label(
+            edit_frame,
+            text="คอลัมน์:"
+        ).pack(
+            side="left"
+        )
+
+        single_var = tk.StringVar()
+
+        single_combo = ttk.Combobox(
+            edit_frame,
+            textvariable=single_var,
+            values=[
+                f"{number} - {name}"
+                for number, name
+                in COLUMN_NAMES.items()
+            ],
+            state="readonly",
+            width=30
+        )
+
+        single_combo.set(
+            f"{self.default_column} - "
+            f"{COLUMN_NAMES[self.default_column]}"
+        )
+
+        single_combo.pack(
+            side="left",
+            padx=8
+        )
+
+        def load_selected(event=None):
+
+            selected = settings_tree.selection()
+
+            if not selected:
+                return
+
+            index = int(
+                selected[0]
+            )
+
+            row = self.rows[
+                index - 1
+            ]
+
+            code = row["code"]
+
+            if code in self.item_settings:
+
+                column = get_column_number(
+                    self.item_settings[code]
+                )
+
+            else:
+
+                column = self.default_column
+
+            single_combo.set(
+                f"{column} - "
+                f"{COLUMN_NAMES[column]}"
+            )
+
+        settings_tree.bind(
+            "<<TreeviewSelect>>",
+            load_selected
+        )
+
+        def change_single():
+
+            selected = settings_tree.selection()
+
+            if not selected:
+
+                messagebox.showwarning(
+                    "ยังไม่ได้เลือก",
+                    "กรุณาเลือกรายการก่อน",
+                    parent=window
+                )
+
+                return
+
+            index = int(
+                selected[0]
+            )
+
+            row = self.rows[
+                index - 1
+            ]
+
+            code = row["code"]
+
+            column = get_combo_number(
+                single_combo
+            )
+
+            # ---------------------------------------------
+            # บันทึกเฉพาะ Item นี้
+            # ---------------------------------------------
+
+            self.item_settings[
+                code
+            ] = column
+
+            self.settings[
+                "default_column"
+            ] = self.default_column
+
+            self.settings[
+                "items"
+            ] = self.item_settings
+
+            save_settings(
+                self.settings
+            )
+
+            refresh_table()
+
+            # เลือกรายการเดิม
+            settings_tree.selection_set(
+                str(index)
+            )
+
+            messagebox.showinfo(
+                "สำเร็จ",
+                (
+                    f"{code}\n\n"
+                    f"เปลี่ยนเป็น "
+                    f"{column} - "
+                    f"{COLUMN_NAMES[column]}"
+                ),
+                parent=window
+            )
+
+        ttk.Button(
+            edit_frame,
+            text="เปลี่ยนรายการที่เลือก",
+            command=change_single
+        ).pack(
+            side="left",
+            padx=8
+        )
+
+        # =================================================
+        # BOTTOM
+        # =================================================
+
+        bottom = ttk.Frame(
+            window,
+            padding=12
+        )
+
+        bottom.pack(
+            fill="x"
+        )
+
+        def reset_all():
+
+            answer = messagebox.askyesno(
+                "ยืนยัน",
+                (
+                    "ต้องการรีเซ็ตทั้งหมดกลับเป็น "
+                    "คอลัมน์ 8 - Theo. Usage ใช่หรือไม่?"
+                ),
+                parent=window
+            )
+
+            if not answer:
+                return
+
+            self.default_column = DEFAULT_COLUMN
+
+            self.item_settings.clear()
+
+            self.settings[
+                "default_column"
+            ] = DEFAULT_COLUMN
+
+            self.settings[
+                "items"
+            ] = {}
+
+            save_settings(
+                self.settings
+            )
+
+            all_combo.set(
+                "8 - Theo. Usage"
+            )
+
+            single_combo.set(
+                "8 - Theo. Usage"
+            )
+
+            refresh_table()
+
+        ttk.Button(
+            bottom,
+            text="↩ รีเซ็ตทั้งหมดเป็น 8",
+            command=reset_all
+        ).pack(
+            side="left"
+        )
+
+        ttk.Button(
+            bottom,
+            text="ปิด",
+            command=window.destroy
+        ).pack(
+            side="right"
         )
 
     # =====================================================
@@ -871,7 +1425,9 @@ class App:
                         "*.xlsx"
                     )
                 ],
-                initialfile="Theo_10000_Result.xlsx"
+                initialfile=(
+                    "Theo_10000_Result.xlsx"
+                )
             )
 
             if not path:
@@ -879,23 +1435,26 @@ class App:
 
             data = []
 
-            for (
-                code,
-                description,
-                theo_usage,
-                result
-            ) in self.rows:
+            for index, row in enumerate(
+                self.rows,
+                start=1
+            ):
 
                 data.append(
                     {
-                        "Item Code": code,
-                        "Description": description,
-                        "Theo Usage": theo_usage,
-                        "ผลลัพธ์": result
+                        "ลำดับ": index,
+                        "Item Code": row["code"],
+                        "Description": row["description"],
+                        "Theo Usage": row["theo_usage"],
+                        "ผลลัพธ์": row["result"],
+                        "คอลัมน์ที่ใช้": row["column"],
+                        "ชื่อคอลัมน์": row["column_name"]
                     }
                 )
 
-            df = pd.DataFrame(data)
+            df = pd.DataFrame(
+                data
+            )
 
             df.to_excel(
                 path,
@@ -925,10 +1484,16 @@ if __name__ == "__main__":
     root = tk.Tk()
 
     try:
-        root.iconname(APP_TITLE)
+
+        root.iconname(
+            APP_TITLE
+        )
+
     except Exception:
         pass
 
-    app = App(root)
+    app = App(
+        root
+    )
 
     root.mainloop()

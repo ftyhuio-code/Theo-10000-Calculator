@@ -1,0 +1,24 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install pyinstaller pdfplumber pandas openpyxl
+      - name: Build EXE
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name Theo_10000_Calculator Theo_10000_Calculator.py
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: Theo_10000_Calculator-Windows
+          path: dist/Theo_10000_Calculator.exe

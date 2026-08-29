@@ -26,18 +26,15 @@ jobs:
 
       - name: Check files
         run: |
-          Get-ChildItem -Recurse -File | Select-Object FullName
+          dir
+          python --version
 
       - name: Build EXE
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name "Theo 10000 Calculator" Theo_10000_Calculator.py
-
-      - name: Check EXE
-        run: |
-          Get-ChildItem dist -File
+          pyinstaller --noconfirm --clean --onefile --windowed --name "Theo_10000_Calculator" "Theo_10000_Calculator.py"
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
-          name: Theo-10000-Calculator-Windows
-          path: "dist/Theo 10000 Calculator.exe"
+          name: Theo_10000_Calculator-Windows
+          path: dist/Theo_10000_Calculator.exe

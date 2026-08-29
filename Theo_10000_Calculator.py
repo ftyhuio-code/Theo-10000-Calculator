@@ -1,7 +1,7 @@
 import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-
+import threading
 import pdfplumber
 
 
@@ -28,18 +28,41 @@ def num(value):
 # EXTRACT PDF
 # =========================================================
 
-def extract_pdf(pdf_path):
+def extract_pdf(pdf_path, status_callback=None):
 
-    text = ""
+    text_parts = []
 
+    # =====================================================
     # อ่าน PDF
+    # =====================================================
+
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            text += "\n" + (page.extract_text() or "")
+
+        total_pages = len(pdf.pages)
+
+        for page_number, page in enumerate(pdf.pages, start=1):
+
+            page_text = page.extract_text() or ""
+
+            if page_text:
+                text_parts.append(page_text)
+
+            if status_callback:
+                status_callback(
+                    f"กำลังอ่าน PDF... หน้า {page_number}/{total_pages}"
+                )
+
+    text = "\n".join(text_parts)
+
+    if not text.strip():
+        raise ValueError("ไม่สามารถอ่านข้อความจาก PDF ได้")
 
     # =====================================================
     # หา Net Sale
     # =====================================================
+
+    if status_callback:
+        status_callback("กำลังค้นหา Net Sale...")
 
     net_sale_match = re.search(
         r"Net\s+Sale\s+([\d,]+(?:\.\d+)?)",
@@ -88,6 +111,11 @@ def extract_pdf(pdf_path):
 
     while i < len(lines):
 
+        if status_callback and i % 20 == 0:
+            status_callback(
+                f"กำลังประมวลผลข้อมูล... {i}/{len(lines)}"
+            )
+
         line = lines[i]
 
         code_match = item_code_pattern.fullmatch(
@@ -101,7 +129,7 @@ def extract_pdf(pdf_path):
         code = code_match.group(0).upper()
 
         # -------------------------------------------------
-        # เก็บข้อความของ Item
+        # เก็บข้อมูลของ Item
         # -------------------------------------------------
 
         block = []
@@ -133,21 +161,24 @@ def extract_pdf(pdf_path):
 
             combined = " ".join(block)
 
-            numbers = number_pattern.findall(
+            number_strings = number_pattern.findall(
                 combined
             )
 
-            # มีตัวเลขครบอย่างน้อย 8 ช่อง
-            if len(numbers) >= 8:
+            # =================================================
+            # เมื่อมีตัวเลขครบ 8 ช่อง
+            # =================================================
+
+            if len(number_strings) >= 8:
                 break
 
             j += 1
 
         block_text = " ".join(block)
 
-        # =================================================
+        # =====================================================
         # ดึงตัวเลข
-        # =================================================
+        # =====================================================
 
         number_strings = number_pattern.findall(
             block_text
@@ -163,9 +194,10 @@ def extract_pdf(pdf_path):
                 ]
 
                 # =================================================
-                # IMPORTANT
+                # Theo Usage
                 #
-                # ใช้ตัวเลขช่องที่ 8 = Theo Usage
+                # ช่องที่ 8
+                # Python index = 7
                 #
                 # 1 Opening
                 # 2 Purchases
@@ -175,25 +207,26 @@ def extract_pdf(pdf_path):
                 # 6 Closing
                 # 7 Act. Usage
                 # 8 Theo. Usage
-                #
-                # Python index = 7
                 # =================================================
 
                 theo_usage = values[7]
 
-                # -------------------------------------------------
+                # =================================================
                 # Description
-                # -------------------------------------------------
+                # =================================================
 
                 first_number = number_pattern.search(
                     block_text
                 )
 
                 if first_number:
+
                     description = block_text[
                         :first_number.start()
                     ].strip()
+
                 else:
+
                     description = block_text.strip()
 
                 description = re.sub(
@@ -207,7 +240,7 @@ def extract_pdf(pdf_path):
                     continue
 
                 # =================================================
-                # คำนวณผลลัพธ์
+                # คำนวณ
                 #
                 # Theo Usage × 10,000 ÷ Net Sale
                 # =================================================
@@ -238,6 +271,9 @@ def extract_pdf(pdf_path):
     # ลบข้อมูลซ้ำ
     # =====================================================
 
+    if status_callback:
+        status_callback("กำลังตรวจสอบและลบข้อมูลซ้ำ...")
+
     clean_rows = []
 
     seen = set()
@@ -260,6 +296,11 @@ def extract_pdf(pdf_path):
         if theo_usage >= 0:
             clean_rows.append(row)
 
+    if status_callback:
+        status_callback(
+            f"ประมวลผลเสร็จแล้ว พบ {len(clean_rows)} รายการ"
+        )
+
     return net_sale, clean_rows
 
 
@@ -275,7 +316,9 @@ class App:
 
         self.root.title(APP_TITLE)
 
-        self.root.geometry("1050x650")
+        self.root.geometry(
+            "1050x650"
+        )
 
         self.root.minsize(
             850,
@@ -331,19 +374,23 @@ class App:
             fill="x"
         )
 
-        ttk.Button(
+        self.open_button = ttk.Button(
             bar,
             text="📄 เลือก PDF",
             command=self.open_pdf
-        ).pack(
+        )
+
+        self.open_button.pack(
             side="left"
         )
 
-        ttk.Button(
+        self.export_button = ttk.Button(
             bar,
             text="📊 Export Excel",
             command=self.export_excel
-        ).pack(
+        )
+
+        self.export_button.pack(
             side="left",
             padx=8
         )
@@ -467,6 +514,160 @@ class App:
             yscrollcommand=scrollbar.set
         )
 
+        # =================================================
+        # LOADING WINDOW
+        # =================================================
+
+        self.loading_window = None
+        self.loading_label = None
+        self.progress = None
+
+    # =====================================================
+    # SHOW LOADING
+    # =====================================================
+
+    def show_loading(self):
+
+        if self.loading_window is not None:
+            return
+
+        self.loading_window = tk.Toplevel(
+            self.root
+        )
+
+        self.loading_window.title(
+            "กำลังประมวลผล"
+        )
+
+        self.loading_window.geometry(
+            "420x170"
+        )
+
+        self.loading_window.resizable(
+            False,
+            False
+        )
+
+        # ป้องกันปิดหน้าต่างระหว่างทำงาน
+        self.loading_window.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: None
+        )
+
+        # อยู่ด้านหน้า
+        self.loading_window.transient(
+            self.root
+        )
+
+        self.loading_window.grab_set()
+
+        container = ttk.Frame(
+            self.loading_window,
+            padding=20
+        )
+
+        container.pack(
+            fill="both",
+            expand=True
+        )
+
+        ttk.Label(
+            container,
+            text="กำลังประมวลผล PDF",
+            font=(
+                "Segoe UI",
+                14,
+                "bold"
+            )
+        ).pack(
+            pady=(0, 12)
+        )
+
+        self.loading_label = ttk.Label(
+            container,
+            text="กำลังเริ่มต้น..."
+        )
+
+        self.loading_label.pack(
+            pady=(0, 12)
+        )
+
+        self.progress = ttk.Progressbar(
+            container,
+            mode="indeterminate",
+            length=350
+        )
+
+        self.progress.pack()
+
+        self.progress.start(10)
+
+        self.root.update_idletasks()
+
+        # จัดกลางหน้าจอ
+        self.loading_window.update_idletasks()
+
+        root_x = self.root.winfo_x()
+        root_y = self.root.winfo_y()
+
+        root_w = self.root.winfo_width()
+        root_h = self.root.winfo_height()
+
+        win_w = self.loading_window.winfo_width()
+        win_h = self.loading_window.winfo_height()
+
+        x = root_x + (root_w - win_w) // 2
+        y = root_y + (root_h - win_h) // 2
+
+        self.loading_window.geometry(
+            f"+{x}+{y}"
+        )
+
+    # =====================================================
+    # UPDATE LOADING
+    # =====================================================
+
+    def update_loading(self, message):
+
+        self.root.after(
+            0,
+            lambda: self._update_loading_text(
+                message
+            )
+        )
+
+    def _update_loading_text(self, message):
+
+        if self.loading_label:
+
+            self.loading_label.config(
+                text=message
+            )
+
+    # =====================================================
+    # HIDE LOADING
+    # =====================================================
+
+    def hide_loading(self):
+
+        if self.loading_window:
+
+            try:
+
+                if self.progress:
+                    self.progress.stop()
+
+                self.loading_window.grab_release()
+
+                self.loading_window.destroy()
+
+            except tk.TclError:
+                pass
+
+        self.loading_window = None
+        self.loading_label = None
+        self.progress = None
+
     # =====================================================
     # OPEN PDF
     # =====================================================
@@ -490,50 +691,157 @@ class App:
         if not path:
             return
 
+        # =================================================
+        # ล็อกปุ่ม
+        # =================================================
+
+        self.open_button.config(
+            state="disabled"
+        )
+
+        self.export_button.config(
+            state="disabled"
+        )
+
+        self.info.config(
+            text="กำลังประมวลผล..."
+        )
+
+        self.show_loading()
+
+        # =================================================
+        # Thread
+        # =================================================
+
+        thread = threading.Thread(
+            target=self.process_pdf,
+            args=(path,),
+            daemon=True
+        )
+
+        thread.start()
+
+    # =====================================================
+    # PROCESS PDF
+    # =====================================================
+
+    def process_pdf(self, path):
+
         try:
 
-            self.net_sale, self.rows = extract_pdf(
-                path
+            net_sale, rows = extract_pdf(
+                path,
+                status_callback=self.update_loading
             )
 
-            # ล้างข้อมูลเก่า
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-
-            # แสดงข้อมูลใหม่
-            for (
-                code,
-                description,
-                theo_usage,
-                result
-            ) in self.rows:
-
-                self.tree.insert(
-                    "",
-                    "end",
-                    values=(
-                        code,
-                        description,
-                        f"{theo_usage:,.2f}",
-                        f"{result:,.2f}"
-                    )
-                )
-
-            self.info.config(
-                text=(
-                    f"Net Sale: "
-                    f"{self.net_sale:,.2f}"
-                    f"   |   "
-                    f"พบ {len(self.rows)} รายการ"
+            self.root.after(
+                0,
+                lambda: self.display_results(
+                    net_sale,
+                    rows
                 )
             )
 
         except Exception as error:
 
-            messagebox.showerror(
-                "อ่าน PDF ไม่สำเร็จ",
-                str(error)
+            self.root.after(
+                0,
+                lambda: self.pdf_error(
+                    error
+                )
             )
+
+    # =====================================================
+    # DISPLAY RESULTS
+    # =====================================================
+
+    def display_results(
+        self,
+        net_sale,
+        rows
+    ):
+
+        self.net_sale = net_sale
+
+        self.rows = rows
+
+        # =================================================
+        # ล้างข้อมูลเดิม
+        # =================================================
+
+        for item in self.tree.get_children():
+
+            self.tree.delete(item)
+
+        # =================================================
+        # แสดงข้อมูล
+        # =================================================
+
+        for (
+            code,
+            description,
+            theo_usage,
+            result
+        ) in rows:
+
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    code,
+                    description,
+                    f"{theo_usage:,.2f}",
+                    f"{result:,.2f}"
+                )
+            )
+
+        # =================================================
+        # Info
+        # =================================================
+
+        self.info.config(
+            text=(
+                f"Net Sale: "
+                f"{self.net_sale:,.2f}"
+                f"   |   "
+                f"พบ {len(self.rows)} รายการ"
+            )
+        )
+
+        self.open_button.config(
+            state="normal"
+        )
+
+        self.export_button.config(
+            state="normal" if self.rows else "disabled"
+        )
+
+        self.hide_loading()
+
+    # =====================================================
+    # PDF ERROR
+    # =====================================================
+
+    def pdf_error(self, error):
+
+        self.hide_loading()
+
+        self.open_button.config(
+            state="normal"
+        )
+
+        self.export_button.config(
+            state="normal" if self.rows else "disabled"
+        )
+
+        self.info.config(
+            text="อ่าน PDF ไม่สำเร็จ"
+        )
+
+        messagebox.showerror(
+            "อ่าน PDF ไม่สำเร็จ",
+            str(error)
+        )
 
     # =====================================================
     # EXPORT EXCEL

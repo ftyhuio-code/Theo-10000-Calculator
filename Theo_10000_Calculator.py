@@ -1,18 +1,16 @@
 import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+
 import pdfplumber
 
 
-APP_TITLE = "Theo 10000 Calculator"
+APP_TITLE = "Theo Usage Calculator"
 
 
-def parse_number(value):
-    """แปลงข้อความตัวเลข เช่น 1,234.50 หรือ (10.00) เป็นตัวเลข"""
+def num(value):
+    """Convert text number to float."""
     value = value.replace(",", "").strip()
-
-    if not value:
-        return 0.0
 
     if value.startswith("(") and value.endswith(")"):
         return -float(value[1:-1])
@@ -21,8 +19,7 @@ def parse_number(value):
 
 
 def extract_pdf(pdf_path):
-    """อ่านข้อมูลจาก Inventory Activity Standard Report"""
-
+    """Read PDF and extract Net Sale + Theo Usage."""
     text = ""
 
     with pdfplumber.open(pdf_path) as pdf:
@@ -30,28 +27,26 @@ def extract_pdf(pdf_path):
             page_text = page.extract_text() or ""
             text += "\n" + page_text
 
-    # --------------------------------------------------
-    # หา Net Sale
-    # --------------------------------------------------
-
-    net_sale_match = re.search(
+    # -----------------------------
+    # Find Net Sale
+    # -----------------------------
+    match = re.search(
         r"Net\s+Sale\s+([\d,]+(?:\.\d+)?)",
         text,
         re.IGNORECASE
     )
 
-    if not net_sale_match:
+    if not match:
         raise ValueError("ไม่พบ Net Sale ใน PDF")
 
-    net_sale = parse_number(net_sale_match.group(1))
+    net_sale = num(match.group(1))
 
     if net_sale == 0:
         raise ValueError("Net Sale เป็น 0 ไม่สามารถคำนวณได้")
 
-    # --------------------------------------------------
-    # แยกบรรทัด
-    # --------------------------------------------------
-
+    # -----------------------------
+    # Split lines
+    # -----------------------------
     lines = [
         line.strip()
         for line in text.splitlines()
@@ -60,140 +55,493 @@ def extract_pdf(pdf_path):
 
     rows = []
 
-    # --------------------------------------------------
-    # หา Item Code
-    # ตัวอย่าง THK0002 / THF2100
-    # --------------------------------------------------
-
-    item_code_pattern = re.compile(
-        r"^TH[A-Z0-9]+$",
+    # Item code เช่น THK0002, THF2100
+    code_pattern = re.compile(
+        r"TH[A-Z0-9]+",
         re.IGNORECASE
     )
 
-    stop_words = (
-        "Sub Total:",
-        "Item Group:",
-        "Total All Item Groups",
-        "QSA -"
+    # Number pattern
+    number_pattern = re.compile(
+        r"\(?-?\d[\d,]*(?:\.\d+)?\)?"
     )
 
     i = 0
 
     while i < len(lines):
 
-        current_line = lines[i]
-        clean_line = current_line.replace(" ", "")
+        line = lines[i]
 
-        if not item_code_pattern.fullmatch(clean_line):
+        # -----------------------------
+        # Detect Item Code
+        # -----------------------------
+        code_match = code_pattern.fullmatch(
+            line.replace(" ", "")
+        )
+
+        if not code_match:
             i += 1
             continue
 
-        code = clean_line.upper()
+        code = code_match.group(0).upper()
 
-        # --------------------------------------------------
-        # เก็บข้อมูลหลัง Item Code
-        # --------------------------------------------------
-
+        # -----------------------------
+        # Collect following lines
+        # -----------------------------
         block = []
+
         j = i + 1
 
         while j < len(lines):
 
             next_line = lines[j]
-            next_clean = next_line.replace(" ", "")
 
-            # เจอ Item Code ตัวใหม่
-            if item_code_pattern.fullmatch(next_clean):
+            # Stop when another item starts
+            if code_pattern.fullmatch(
+                next_line.replace(" ", "")
+            ):
                 break
 
-            # เจอหัวข้อที่ไม่ใช่ข้อมูลสินค้า
-            if next_line.startswith(stop_words):
+            # Stop at report sections
+            if next_line.startswith(
+                (
+                    "Sub Total:",
+                    "Item Group:",
+                    "Total All Item Groups",
+                    "QSA -",
+                )
+            ):
                 break
 
             block.append(next_line)
 
             combined = " ".join(block)
 
-            # ตรวจจำนวนตัวเลข
-            number_matches = re.findall(
-                r"?-?\d[\d,]*(?:\.\d+)??",
-                combined
-            )
+            numbers = number_pattern.findall(combined)
 
-            # แถวข้อมูลปกติมีตัวเลขจำนวนมาก
-            if len(number_matches) >= 12:
+            # Normal item row contains at least 8 numbers:
+            #
+            # Opening
+            # Purchases
+            # Return
+            # Transfer In
+            # Transfer Out
+            # Closing
+            # Act Usage
+            # Theo Usage
+            #
+            if len(numbers) >= 8:
                 break
 
             j += 1
 
         block_text = " ".join(block)
 
-        # --------------------------------------------------
-        # ดึงตัวเลข
-        # --------------------------------------------------
+        numbers = number_pattern.findall(block_text)
 
-        number_matches = re.findall(
-            r"?-?\d[\d,]*(?:\.\d+)??",
-            block_text
-        )
-
-        if len(number_matches) >= 8:
+        if len(numbers) >= 8:
 
             try:
-
                 values = [
-                    parse_number(x)
-                    for x in number_matches
+                    num(value)
+                    for value in numbers
                 ]
 
-                # ลำดับข้อมูล:
-                #
-                # 0 = Opening
-                # 1 = Purchases
-                # 2 = Return
-                # 3 = Transfer In
-                # 4 = Transfer Out
-                # 5 = Closing
-                # 6 = Act. Usage
-                # 7 = Theo. Usage
-
+                # Theo Usage = numeric field #8
                 theo_usage = values[7]
 
-                # --------------------------------------------------
-                # สูตร
-                #
-                # Theo Usage × 10,000 ÷ Net Sale
-                #
-                # ผลลัพธ์เป็น "ตัวเลข"
-                # ไม่ใช่เปอร์เซ็นต์
-                # --------------------------------------------------
-
-                theo_result = (
-                    theo_usage * 10000
-                ) / net_sale
-
-                # --------------------------------------------------
-                # Description
-                # --------------------------------------------------
-
-                desc_match = re.match(
-                    r"^(.*?)(?=?-?\d[\d,]*(?:\.\d+)??)",
+                # -----------------------------
+                # Find description
+                # -----------------------------
+                first_number = number_pattern.search(
                     block_text
                 )
 
-                if desc_match:
-                    description = desc_match.group(1).strip()
+                if first_number:
+                    description = (
+                        block_text[:first_number.start()]
+                        .strip()
+                    )
                 else:
-                    description = block_text
+                    description = block_text.strip()
 
-                # ล้าง Description ที่ไม่จำเป็น
-                description = description.strip()
+                # Clean description
+                description = re.sub(
+                    r"\s+",
+                    " ",
+                    description
+                )
 
                 if description:
+
+                    # -----------------------------
+                    # Theo Usage calculation
+                    #
+                    # Theo Usage × 10,000 ÷ Net Sale
+                    #
+                    # IMPORTANT:
+                    # Result is a NUMBER, NOT %
+                    # -----------------------------
+                    theo_10000 = (
+                        theo_usage * 10000 / net_sale
+                    )
 
                     rows.append(
                         (
                             code,
                             description,
                             theo_usage,
-                            theo_result
+                            theo_10000
+                        )
+                    )
+
+            except (ValueError, IndexError):
+                pass
+
+        # Move to next section
+        i = max(i + 1, j)
+
+    # -----------------------------
+    # Remove duplicates
+    # -----------------------------
+    clean_rows = []
+    seen = set()
+
+    for row in rows:
+
+        code, description, theo, result = row
+
+        key = (
+            code,
+            round(theo, 6)
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        # Keep positive Theo values
+        if theo >= 0:
+            clean_rows.append(row)
+
+    return net_sale, clean_rows
+
+
+class App:
+
+    def __init__(self, root):
+
+        self.root = root
+
+        self.root.title(APP_TITLE)
+        self.root.geometry("1050x650")
+        self.root.minsize(850, 550)
+
+        self.rows = []
+        self.net_sale = 0
+
+        # -----------------------------
+        # Top section
+        # -----------------------------
+        top = ttk.Frame(
+            root,
+            padding=12
+        )
+
+        top.pack(
+            fill="x"
+        )
+
+        ttk.Label(
+            top,
+            text=APP_TITLE,
+            font=("Segoe UI", 18, "bold")
+        ).pack(
+            anchor="w"
+        )
+
+        ttk.Label(
+            top,
+            text=(
+                "Theo Usage × 10,000 ÷ Net Sale "
+                "และแสดงผลเป็นตัวเลข"
+            )
+        ).pack(
+            anchor="w",
+            pady=(4, 10)
+        )
+
+        # -----------------------------
+        # Buttons
+        # -----------------------------
+        bar = ttk.Frame(top)
+
+        bar.pack(
+            fill="x"
+        )
+
+        ttk.Button(
+            bar,
+            text="📄 เลือก PDF",
+            command=self.open_pdf
+        ).pack(
+            side="left"
+        )
+
+        ttk.Button(
+            bar,
+            text="📊 Export Excel",
+            command=self.export_excel
+        ).pack(
+            side="left",
+            padx=8
+        )
+
+        self.info = ttk.Label(
+            bar,
+            text="ยังไม่ได้เลือกไฟล์"
+        )
+
+        self.info.pack(
+            side="left",
+            padx=8
+        )
+
+        # -----------------------------
+        # Table
+        # -----------------------------
+        frame = ttk.Frame(
+            root,
+            padding=(12, 0, 12, 12)
+        )
+
+        frame.pack(
+            fill="both",
+            expand=True
+        )
+
+        columns = (
+            "code",
+            "desc",
+            "theo",
+            "result"
+        )
+
+        self.tree = ttk.Treeview(
+            frame,
+            columns=columns,
+            show="headings"
+        )
+
+        # Headers
+        self.tree.heading(
+            "code",
+            text="Item Code"
+        )
+
+        self.tree.heading(
+            "desc",
+            text="Description"
+        )
+
+        self.tree.heading(
+            "theo",
+            text="Theo Usage"
+        )
+
+        self.tree.heading(
+            "result",
+            text="Theo Usage × 10,000 ÷ Sales"
+        )
+
+        # Column sizes
+        self.tree.column(
+            "code",
+            width=120
+        )
+
+        self.tree.column(
+            "desc",
+            width=450
+        )
+
+        self.tree.column(
+            "theo",
+            width=130,
+            anchor="e"
+        )
+
+        self.tree.column(
+            "result",
+            width=230,
+            anchor="e"
+        )
+
+        self.tree.pack(
+            side="left",
+            fill="both",
+            expand=True
+        )
+
+        # -----------------------------
+        # Scrollbar
+        # -----------------------------
+        scrollbar = ttk.Scrollbar(
+            frame,
+            orient="vertical",
+            command=self.tree.yview
+        )
+
+        scrollbar.pack(
+            side="right",
+            fill="y"
+        )
+
+        self.tree.configure(
+            yscrollcommand=scrollbar.set
+        )
+
+    # ==================================================
+    # OPEN PDF
+    # ==================================================
+
+    def open_pdf(self):
+
+        path = filedialog.askopenfilename(
+            title="เลือก Inventory Activity Standard Report",
+            filetypes=[
+                ("PDF files", "*.pdf"),
+                ("All files", "*.*")
+            ]
+        )
+
+        if not path:
+            return
+
+        try:
+
+            self.net_sale, self.rows = extract_pdf(path)
+
+            # Clear table
+            for item in self.tree.get_children():
+                self.tree.delete(item)
+
+            # Insert rows
+            for (
+                code,
+                description,
+                theo_usage,
+                result
+            ) in self.rows:
+
+                self.tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        code,
+                        description,
+                        f"{theo_usage:,.2f}",
+                        f"{result:,.2f}"
+                    )
+                )
+
+            self.info.config(
+                text=(
+                    f"Net Sale: {self.net_sale:,.2f} "
+                    f"| พบ {len(self.rows)} รายการ"
+                )
+            )
+
+        except Exception as error:
+
+            messagebox.showerror(
+                "อ่าน PDF ไม่สำเร็จ",
+                str(error)
+            )
+
+    # ==================================================
+    # EXPORT EXCEL
+    # ==================================================
+
+    def export_excel(self):
+
+        if not self.rows:
+
+            messagebox.showwarning(
+                "ยังไม่มีข้อมูล",
+                "กรุณาเลือก PDF ก่อน"
+            )
+
+            return
+
+        try:
+
+            import pandas as pd
+
+            path = filedialog.asksaveasfilename(
+                title="บันทึกผลลัพธ์",
+                defaultextension=".xlsx",
+                filetypes=[
+                    ("Excel Workbook", "*.xlsx")
+                ],
+                initialfile="Theo_10000_Result.xlsx"
+            )
+
+            if not path:
+                return
+
+            data = []
+
+            for (
+                code,
+                description,
+                theo_usage,
+                result
+            ) in self.rows:
+
+                data.append(
+                    {
+                        "Item Code": code,
+                        "Description": description,
+                        "Theo Usage": theo_usage,
+                        "Theo Usage × 10,000 ÷ Net Sale": result
+                    }
+                )
+
+            df = pd.DataFrame(data)
+
+            df.to_excel(
+                path,
+                index=False
+            )
+
+            messagebox.showinfo(
+                "สำเร็จ",
+                f"บันทึกไฟล์แล้ว\n\n{path}"
+            )
+
+        except Exception as error:
+
+            messagebox.showerror(
+                "Export ไม่สำเร็จ",
+                str(error)
+            )
+
+
+# ======================================================
+# MAIN
+# ======================================================
+
+if __name__ == "__main__":
+
+    root = tk.Tk()
+
+    try:
+        root.iconname(APP_TITLE)
+    except Exception:
+        pass
+
+    app = App(root)
+
+    root.mainloop()

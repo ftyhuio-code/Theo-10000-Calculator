@@ -3,38 +3,146 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import pdfplumber
 
-APP_TITLE = "Theo × 10,000 Calculator"
+APP_TITLE = "Theo Usage × 10,000 Calculator"
 
 
 def num(s):
     s = s.replace(",", "").strip()
+
     if s.startswith("(") and s.endswith(")"):
         return -float(s[1:-1])
+
     return float(s)
 
 
 def extract_pdf(pdf_path):
-    """
-    อ่าน Inventory Activity Standard Report
-
-    สูตร:
-        Theo Usage × 10,000 ÷ Net Sale
-
-    สำคัญ:
-    พยายามอ่านค่าจากตำแหน่ง Theo. Usage
-    โดยอาศัยหัวตารางและโครงสร้างแถว
-    """
-
-    all_lines = []
+    text = ""
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            text = page.extract_text() or ""
-            all_lines.extend(
-                line.strip()
-                for line in text.splitlines()
-                if line.strip()
+            text += "\n" + (page.extract_text() or "")
+
+    # หา Net Sale
+    m = re.search(r"Net Sale\s+([\d,]+\.\d+)", text, re.I)
+
+    if not m:
+        raise ValueError("ไม่พบ Net Sale ใน PDF")
+
+    net_sale = num(m.group(1))
+
+    rows = []
+
+    lines = [x.strip() for x in text.splitlines() if x.strip()]
+
+    i = 0
+
+    while i < len(lines):
+
+        line = lines[i]
+
+        # หา Item Code เช่น THK0002 / THF2100
+        code_match = re.fullmatch(
+            r"(TH[A-Z0-9]+)",
+            line.replace(" ", "")
+        )
+
+        if code_match:
+
+            code = code_match.group(1)
+
+            j = i + 1
+            block = []
+
+            while (
+                j < len(lines)
+                and not re.fullmatch(
+                    r"TH[A-Z0-9]+",
+                    lines[j].replace(" ", "")
+                )
+                and not lines[j].startswith(
+                    (
+                        "Sub Total:",
+                        "Item Group:",
+                        "Total All Item Groups",
+                        "QSA -"
+                    )
+                )
+            ):
+
+                block.append(lines[j])
+
+                numeric_count = len(
+                    re.findall(
+                        r"?-?\d[\d,]*\.?\d*?",
+                        " ".join(block)
+                    )
+                )
+
+                if numeric_count >= 12:
+                    break
+
+                j += 1
+
+            block_text = " ".join(block)
+
+            # ตัวเลขในแถว
+            number_list = re.findall(
+                r"?-?\d[\d,]*\.?\d*?",
+                block_text
             )
+
+            if len(number_list) >= 8:
+
+                try:
+
+                    values = [num(x) for x in number_list]
+
+                    # ลำดับ:
+                    # 1 Opening
+                    # 2 Purchases
+                    # 3 Return
+                    # 4 Transfer In
+                    # 5 Transfer Out
+                    # 6 Closing
+                    # 7 Act Usage
+                    # 8 Theo Usage
+
+                    theo_usage = values[7]
+
+                    # สูตรใหม่
+                    # Theo Usage × 10,000 ÷ Net Sale
+                    result = (
+                        theo_usage * 10000 / net_sale
+                        if net_sale
+                        else 0
+                    )
+
+                    # Description
+                    desc = re.split(
+                        r"?-?\d[\d,]*\.?\d*?",
+                        block_text,
+                        maxsplit=1
+                    )[0].strip()
+
+                    if desc and not desc.startswith(
+                        ("x ", "PC ", "PA ", "CU ")
+                    ):
+                        rows.append(
+                            (
+                                code,
+                                desc,
+                                theo_usage,
+                                result
+                            )
+                        )
+
+                except Exception:
+                    pass
+
+            i = max(i + 1, j)
+
+        else:
+            i +=            )
 
     text_all = "\n".join(all_lines)
 
